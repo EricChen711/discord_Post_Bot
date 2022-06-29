@@ -8,13 +8,16 @@ import tweepy
 import random
 import codecs
 import urllib.request
-import ehapi
+import ehapi  
+import asyncio,validators,aiohttp,aiofiles,io
 from discord.ext import commands
+from discord import User
 from core.classes import Cog_Extension
 from plurk_oauth import PlurkAPI
 from pathlib import Path
 from bs4 import BeautifulSoup
 from lxml import html
+from xml.sax import saxutils as su
 
 ICON_PIXIV = "https://cdn.discordapp.com/attachments/881168385507999798/883280819085520916/pixiv.png"
 ICON_TWITTER = "https://cdn.discordapp.com/attachments/881168385507999798/883411224426070086/pngegg.png"
@@ -22,8 +25,13 @@ ICON_PLURK = "https://cdn.discordapp.com/attachments/881168385507999798/88328095
 ICON_YANDE = "https://cdn.discordapp.com/attachments/881168385507999798/883285343107960842/yande.jpg"
 ICON_SANKAKU = "https://cdn.discordapp.com/attachments/881168385507999798/883280516676202556/sankaku.png"
 ICON_MELONBOOKS = "https://cdn.discordapp.com/attachments/881168385507999798/883264713159499796/melonbooks.png"
+ICON_DISCORD = "https://cdn.discordapp.com/attachments/881168385507999798/884792515511857202/discord.png"
 
 class Event(Cog_Extension):
+   def __init__(self,bot:commands.Bot)->None:
+      self.bot=bot
+
+
    #以下pixiv
    p1=re.compile('www\.pixiv\.net\/member_illust\.php')
    p2=re.compile('www\.pixiv\.net\/artworks')
@@ -47,6 +55,9 @@ class Event(Cog_Extension):
    p14=re.compile('ptthito\.com\/.*')
    #以下melonbooks
    p15=re.compile('www\.melonbooks\.co\.jp\/detail\/detail\.php\?product_id=\d+')
+   DISCORD_MEDIA=re.compile('(media|cdn)\.discordapp\.(net|com)\/attachments\/\d+\/\d+\/.*\.(jpg|jpeg|png|bmp|tif|TIFF|svg|gif)')
+   #以下webm
+   p16=re.compile("https://\S{3,50}.webm")
    
    with open('setting.json','r',encoding='utf8') as jfile:
       jdata=json.load(jfile)
@@ -141,6 +152,7 @@ class Event(Cog_Extension):
       channel = await self.bot.fetch_channel(payload.channel_id)
       message = await channel.fetch_message(payload.message_id)
       url=""
+      # Reload the url
       if message.author.id==self.bot.user.id and payload.emoji.name=="idk":
          print(message.embeds)
          if message.embeds!=[]:
@@ -165,6 +177,12 @@ class Event(Cog_Extension):
                num=int(url[a.start()+1:])+1
                url=url[:a.start()]+"#"+str(num)
             await message.edit(content=url)
+      # Delete the bot message
+      if message.author.id==self.bot.user.id and payload.emoji.name=="pepe4":
+         for reaction in message.reactions:
+            if reaction.emoji.name=='pepe4':
+               if reaction.count>=1:
+                  await message.delete()
 
    @commands.Cog.listener()
    async def on_message(self,msg):
@@ -176,11 +194,22 @@ class Event(Cog_Extension):
       
       isExplicit=False
       # check message is explicit ?
-      if msg.content.count("||") == 2:
+      if msg.content.count("||") >= 2:
         isExplicit=True
         msg.content.replace("||","")
         
       print(msg.author,msg.content)
+
+      #綜合篩選身分組
+      if (msg.channel.id ==self.jdata['sfwchannel']):
+
+         roleList1=msg.author.roles
+         roleList2=[]
+         for roles in roleList1:
+            roleList2.append(roles.name)
+         if ("想貼圖的島民" not in roleList2):
+            return
+
       #以下pixiv
       a=self.p1.search(msg.content)
       if a==None:
@@ -202,7 +231,7 @@ class Event(Cog_Extension):
          embed.add_field(name="Author", value="["+uName+"]("+"https://www.pixiv.net/users/"+uId+")", inline=True)
          embed.add_field(name="Illust ID", value="["+strf+"]("+"https://www.pixiv.net/artworks/"+strf+")", inline=True)
          embed.description = description
-         embed.set_footer(text="Pixiv ")
+         embed.set_footer(text="Pixiv | By "+str(msg.author.display_name)+" ")
          if "ugoira" in image_url:
             image_url, edit_imageProfile_url = self.pixivDLGIF2URL(uId,image_url,imageProfile_url)
             # pre-cache for server
@@ -260,6 +289,7 @@ class Event(Cog_Extension):
                 embed.set_thumbnail(url=edit_imageProfile_url)
                 await msg.channel.send(embed=embed)
          try:
+            await asyncio.sleep(1.5)
             await msg.edit(suppress=True)
          except:
             print('沒有關閉embed的權限')
@@ -292,9 +322,9 @@ class Event(Cog_Extension):
          embed.set_author(name=uName+"(@"+uId+")", url="https://twitter.com/"+uId, icon_url=ICON_TWITTER)
          embed.add_field(name="Retweets", value=retweet_count, inline=True)
          embed.add_field(name="Likes", value=favorite_count, inline=True)
-         embed.description = description
+         embed.description = self.html_decode(description)
          embed.set_thumbnail(url=imageProfile_url)
-         embed.set_footer(text="Twitter ")
+         embed.set_footer(text="Twitter | By "+str(msg.author.display_name)+" ")
          try:
             twitterMedia=status.extended_entities['media']
             k=True
@@ -313,7 +343,7 @@ class Event(Cog_Extension):
                 await msg.channel.send(embed=embed)
                 await msg.channel.send(self.msgSendProcess(twitterMedia['variants'][maxIndex]['url'], isExplicit))
             except KeyError:  #twitter沒影片
-               image_url=twitterMedia[0]['media_url_https']
+               image_url=twitterMedia[0]['media_url_https']+":orig"
                if isExplicit:
                    await msg.channel.send(embed=embed)
                    await msg.channel.send(self.msgSendProcess(image_url, isExplicit))
@@ -321,8 +351,9 @@ class Event(Cog_Extension):
                    embed.set_image(url=image_url)
                    await msg.channel.send(embed=embed)
                for i in range(1,len(status.extended_entities['media'])):
-                  await msg.channel.send(self.msgSendProcess(twitterMedia[i]['media_url_https'], isExplicit))
+                  await msg.channel.send(self.msgSendProcess(twitterMedia[i]['media_url_https']+":orig", isExplicit))
          try:
+            await asyncio.sleep(1.5)
             await msg.edit(suppress=True)
          except:
             print('沒有關閉embed的權限')
@@ -356,7 +387,7 @@ class Event(Cog_Extension):
          embed=discord.Embed(title='', color=colonn, timestamp=timestamp)
          embed.set_author(name=display_name+"(@"+nick_name+")", url="https://www.plurk.com/"+nick_name, icon_url=ICON_PLURK)
          embed.set_thumbnail(url="https://avatars.plurk.com/"+str(owner_id)+"-big"+str(avatar)+".jpg")
-         embed.set_footer(text="Plurk ")
+         embed.set_footer(text="Plurk | By "+str(msg.author.display_name)+" ")
          embed.add_field(name="喜歡", value=favorite_count, inline=True)
          embed.add_field(name="轉噗", value=replurkers_count, inline=True)
          embed.add_field(name="回應", value=response_count, inline=True)
@@ -385,6 +416,7 @@ class Event(Cog_Extension):
                  await msg.channel.send(embed=embed)
                  
              try:
+                  await asyncio.sleep(1.5)
                   await msg.edit(suppress=True)
              except:
                   print('沒有關閉embed的權限')
@@ -401,6 +433,8 @@ class Event(Cog_Extension):
             if a!=None:
                 ispage = 1
       if a!=None:
+            if msg.channel.id ==self.jdata['sfwchannel']:
+                isExplicit=True
             galleries = ehapi.get_galleries(msg.content)
             if galleries:
                 if len(galleries) > 5:  # don't spam chat too much if user spams links
@@ -410,8 +444,29 @@ class Event(Cog_Extension):
                         await msg.channel.send(embed=ehapi.embed_full(gallery, isExplicit))
                         if isExplicit:
                             await msg.channel.send(self.msgSendProcess(gallery['thumb'], isExplicit))
+            '''
+            if ispage:
+                url = re.search('(?P<url>https?:\/\/e[\-x]hentai\.org\/s\/([\da-f]{10})\/(\d+)\-(\d+))', msg.content).group("url")
+                page_token = url.rsplit('/', -1)[-2]
+                gid = url.rsplit('/', 1)[-1].split('_', 1)[0].split('-', 1)[0]
+                page = url.rsplit('/', 1)[-1].split('_', 1)[0].split('-', 1)[1]
+                r =  requests.get(url,headers = {'ipb_member_id': self.jdata['eh_ipb_member_id'], 'ipb_pass_hash': self.jdata['eh_ipb_pass_hash']})
+                key = re.compile(';key=\w+\"').search(r.text).group(0)[:-1][5:]
+                download_url = "https://e-hentai.org/fullimg.php?gid="+gid+"&page="+page+"&key="+key
+                img_name = page_token + ".jpg"
+                print(download_url)
+                IMG_DIR = self.jdata['IMG_DIR']
+                DOMAIN = self.jdata['DOMAIN']
+                PROJECT_DIR = "/home32/ch010060/downloads/github/kentaiBot2/"
+                command = "aria2c --load-cookies='" + PROJECT_DIR +"cookies.txt' '"+ download_url + "' && mv $(ls *.{png,jpg} 2>/dev/null) " + IMG_DIR + img_name
+                print(command)
+                os.system(command)
+                domain_url = DOMAIN + img_name
+                await msg.channel.send(domain_url)
+            '''
             try:
                 if not isExplicit:
+                    await asyncio.sleep(1.5)
                     await msg.edit(suppress=True)
             except:
                print('沒有關閉embed的權限')
@@ -430,9 +485,10 @@ class Event(Cog_Extension):
                 embed=discord.Embed(title='yande.re',url=image_url, color=colonn)
                 embed.set_image(url=image_url)
                 embed.set_thumbnail(url=ICON_YANDE)
-                embed.set_footer(text="yande.re ")
+                embed.set_footer(text="yande.re | By "+str(msg.author.display_name)+" ")
                 await msg.channel.send(embed=embed)
             try:
+                await asyncio.sleep(1.5)
                 await msg.edit(suppress=True)
             except:
                 print('沒有關閉embed的權限')
@@ -451,10 +507,11 @@ class Event(Cog_Extension):
                 embed=discord.Embed(title='chan.sankakucomplex.com',url=image_url, color=colonn)
                 embed.set_image(url=image_url)
                 embed.set_thumbnail(url=ICON_SANKAKU)
-                embed.set_footer(text="SankakuComplex ")
+                embed.set_footer(text="SankakuComplex | By "+str(msg.author.display_name)+" ")
                 await msg.channel.send(embed=embed)
             try:
                 if not isExplicit:
+                    await asyncio.sleep(1.5)
                     await msg.edit(suppress=True)
             except:
                 print('沒有關閉embed的權限')
@@ -469,14 +526,17 @@ class Event(Cog_Extension):
         # rewrite to moptt url
         try:
             url = re.search('(?P<url>https?:\/\/www\.ptt\.cc\/bbs\/.*\/.*\.html)', msg.content).group("url")
-            url = url.rsplit('/', 1)[0].replace("www.ptt.cc/bbs","moptt.tw/p") + "." + url.rsplit('/', 1)[1].replace(".html","")
+            if url:
+                url = url.replace("www.ptt.cc","www.pttweb.cc").replace(".html","")
+            #url = url.rsplit('/', 1)[0].replace("www.ptt.cc/bbs","moptt.tw/p") + "." + url.rsplit('/', 1)[1].replace(".html","")
         except:
             url = re.search('(?P<url>https?:\/\/ptthito\.com\/.*\/.*\/)', msg.content).group("url")
             if url[-1:] == "/":
                 url = url[:-1]
-            url = url.rsplit('/', 1)[0].replace("ptthito.com","moptt.tw/p") + "." + url.rsplit('/', 1)[1].replace("-",".").upper()
+            url = url.replace("ptthito.com","www.pttweb.cc").replace(".html","")
         await msg.channel.send(self.msgSendProcess(url, isExplicit))
         try:
+            await asyncio.sleep(1.5)
             await msg.edit(suppress=True)
         except:
             print('沒有關閉embed的權限')
@@ -489,7 +549,7 @@ class Event(Cog_Extension):
             colonn = random.randint(0,255)*65536+random.randint(0,255)*256+random.randint(0,255)
             embed=discord.Embed(title=title,url=url, color=colonn)
             embed.set_author(name=author+" ("+circle+")", url="https://www.melonbooks.co.jp/search/search.php?name="+author+"&text_type=author")
-            embed.set_footer(text=page + " pages")
+            embed.set_footer(text="Melonbooks | "+page + " pages | By "+str(msg.author.display_name)+" ")
             embed.add_field(name="発行日", value=release_date, inline=True)
             embed.add_field(name="ジャンル", value=type, inline=True)
             embed.add_field(name="作品種別", value=age, inline=True)
@@ -502,17 +562,77 @@ class Event(Cog_Extension):
                 embed.set_image(url=image_url)
                 await msg.channel.send(embed=embed)
             try:
+                await asyncio.sleep(1.5)
                 await msg.edit(suppress=True)
             except:
                 print('沒有關閉embed的權限')
-            
+                
+      #以下discord media
+      try:
+         a=self.DISCORD_MEDIA.search(msg.attachments[0].url)
+         media_channel_list = self.jdata['mediachannel']
+         msg_channel_id=str(msg.channel.id)
+         if hasattr(msg.channel,"parent_id"):
+            msg_channel_id=str(msg.channel.parent_id)
+         
+         if a!=None and (msg_channel_id in media_channel_list or str(msg.channel.id) == "881168385507999798") and not msg.content.startswith('🍆'):
+            colonn = random.randint(0,255)*65536+random.randint(0,255)*256+random.randint(0,255)
+            for i in range(len(msg.attachments)):
+                image_url = self.msgMedia2URL(msg.attachments[i].url, msg.author.id)
+                if i == 0:
+                    embed=discord.Embed(color=colonn, timestamp=msg.created_at)
+                    #embed.set_author(name=msg.author, icon_url=ICON_DISCORD)
+                    embed.set_author(name=msg.author, icon_url=msg.author.avatar.url)
+                    embed.set_image(url=image_url)
+                    embed.set_footer(text="Discord | By "+str(msg.author.display_name)+" ")
+                    #embed.set_thumbnail(url=msg.author.avatar_url)
+                    embed.description = msg.content
+                    await msg.delete()
+                    await msg.channel.send(embed=embed)
+                else:
+                    await msg.channel.send(image_url)
+      except:
+        pass # 無media
+                
+      #以下webm
+      
+      a=self.p16.search(msg.content)
+      if a!=None:
+         URL=a.group()
+         if validators.url(URL):
+            async with aiohttp.ClientSession(headers=self.headers) as session:
+               async with session.get(URL) as resp:
+                  if resp.status == 200 and resp.headers['Content-Type'] =="video/webm":
+                     f = await aiofiles.open("temp.webm", mode='wb')
+                     await f.write(await resp.read())
+                     await f.close()
+                     while True:
+                        if os.path.exists("temp.mp4"):
+                           await asyncio.sleep(0.5)
+                        else:
+                           break
+                     os.system("ffmpeg -i temp.webm -preset veryfast -loglevel quiet temp.mp4")
+
+                     data = io.BytesIO(await resp.read())
+                     tempChannel = await self.bot.fetch_channel(self.jdata["temppicchannel"])
+                     tempMessage=await tempChannel.send(file=discord.File("temp.mp4"))
+                     picURL=tempMessage.attachments[0].url
+                     await msg.channel.send(content=msg.author.display_name+"轉貼了一組webm網址：",reference=msg.reference)
+                     await msg.channel.send(picURL)
+                     os.remove("temp.mp4")
+                     try:
+                        await asyncio.sleep(1.5)
+                        await msg.edit(suppress=True)
+                     except:
+                        print('沒有關閉embed的權限')
+
    # post process msg content
    def msgSendProcess(self,str,isExplicit):
         if not isExplicit:
             return str
         else:
             return "|| " + str + " ||"
-
+   
    # get melonbooks metadata
    def melonbooksMetadata(self,url):
         R_COOKIE = {'AUTH_ADULT': '1'}
@@ -553,8 +673,8 @@ class Event(Cog_Extension):
    def pixivMetadata(self,id):
         r =  requests.get("https://www.pixiv.net/artworks/"+id,headers = self.headers)
         soup = BeautifulSoup(r.text, 'html.parser')
-        meta=soup.find_all('meta')
-        content=meta[25].get('content')
+        meta=soup.select("meta#meta-preload-data")
+        content=meta[0].get('content')
         content=content.replace('false','\"false\"').replace('true','\"true\"').replace('null','\"null\"')
 
         jdata=json.loads(content)
@@ -598,7 +718,7 @@ class Event(Cog_Extension):
             # Download image
             urllib.request.urlretrieve(img_url, img_path)
             
-            # Compress image with pngquant
+            # Compress image with imagemagic
             command = "convert " + img_path + " " + img_path
             os.system(command)
         
@@ -646,11 +766,59 @@ class Event(Cog_Extension):
         print(domain_imageProfile_url)
         return domain_url, domain_imageProfile_url
         
+   # get discord media
+   def msgMedia2URL(self,img_url,author_id):
+        MEDIA_PATH = "media"
+        IMG_DIR = self.jdata['IMG_DIR']
+        DOMAIN = self.jdata['DOMAIN']
+        
+        # Get timestamp, msg author, channel id, image id, image extension
+        timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S%f")
+        channel_id = img_url.rsplit('/', -1)[-3]
+        image_id = img_url.rsplit('/', -1)[-2]
+        image_ext = img_url.rsplit('/', 1)[-1].rsplit('.',-1)[-1]
+        if image_ext != "gif":
+            img_filename = timestamp + "_" + channel_id + "_" + str(author_id) + ".jpg"
+        else:
+            img_filename = timestamp + "_" + channel_id + "_" + str(author_id) + ".gif"
+        img_path = os.path.join(IMG_DIR, MEDIA_PATH, img_filename)
+        
+        # Download image
+        opener = urllib.request.build_opener()
+        opener.addheaders = [('user-agent', self.USER_AGENT)]
+        urllib.request.install_opener(opener)
+        urllib.request.urlretrieve(img_url, img_path)
+        
+        # Compress image with imagemagic
+        if image_ext != "gif":
+            command = "convert " + img_path + " " + img_path
+            os.system(command)
+        
+        domain_url = DOMAIN + MEDIA_PATH + "/" + img_filename
+        print(domain_url)
+        return domain_url
+   
    def cleanhtml(self,raw_html):
       cleanr = re.compile('<.*?>')
       cleantext = re.sub(cleanr, '', raw_html)
-      return cleantext
-       
-
-def setup(bot):
-   bot.add_cog(Event(bot))
+      return self.html_decode(cleantext)
+      
+   def html_decode(self,s):
+        """
+        Returns the ASCII decoded version of the given HTML string. This does
+        NOT remove normal HTML tags like <p>.
+        """
+        htmlCodes = (
+                (",", '&#44;'),
+                ("'", '&#39;'),
+                ('"', '&quot;'),
+                ('＞', '&gt;'),
+                ('＜', '&lt;'),
+                ('&', '&amp;')
+            )
+        for code in htmlCodes:
+            s = s.replace(code[1], code[0])
+        return s
+   
+async def setup(bot:commands.Bot)->None:
+   await bot.add_cog(Event(bot))
